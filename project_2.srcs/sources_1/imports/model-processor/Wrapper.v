@@ -237,19 +237,58 @@ module Wrapper (
                              is_suited ? suited_idx :
                                          offsuit_idx;
 
-    // Switches: 1..6 -> 0..5. If switches are unset (0) or out of range
-    // (>6) the subtraction wraps, which yields an "invalid"-ish ROM entry
-    // (almost certainly valid=0). The renderer suppresses the rows in that
-    // case, so the display simply stays blank until the user dials real
-    // positions in.
-    wire [2:0] hero_pos_raw     = SW_Q[15:13];
-    wire [2:0] villain_pos_raw  = SW_Q[2:0];
-    wire [1:0] facing_action_sw = SW_Q[8:7];
-    wire [2:0] hero_pos     = hero_pos_raw    - 3'd1;
-    wire [2:0] villain_pos  = villain_pos_raw - 3'd1;
-    wire       switches_ok = (hero_pos_raw    >= 3'd1) && (hero_pos_raw    <= 3'd6)
-                          && (villain_pos_raw >= 3'd1) && (villain_pos_raw <= 3'd6)
-                          && (facing_action_sw <= 2'd2);
+    // Switches (one-hot, left-most switch in each field is UTG / RFI):
+    //   Hero position field:    SW[15:10]  one-hot, SW[15]=UTG .. SW[10]=BB
+    //   Villain position field: SW[5:0]    one-hot, SW[5]=UTG  .. SW[0]=BB
+    //   Action field:           SW[8:6]    one-hot, SW[8]=RFI, SW[7]=OPEN,
+    //                                      SW[6]=3BET
+    // Exactly one bit per field must be set. Anything else (zero or
+    // multiple bits on) drives switches_ok=0 and the POS row prints
+    // "INVALID" / preflop rows stay hidden.
+    wire [5:0] hero_oh    = SW_Q[15:10];
+    wire [5:0] villain_oh = SW_Q[5:0];
+    wire [2:0] action_oh  = SW_Q[8:6];
+
+    reg [2:0] hero_pos;
+    reg       hero_pos_vld;
+    always @(*) begin
+        case (hero_oh)
+            6'b100000: begin hero_pos = 3'd0; hero_pos_vld = 1'b1; end  // UTG
+            6'b010000: begin hero_pos = 3'd1; hero_pos_vld = 1'b1; end  // HJ
+            6'b001000: begin hero_pos = 3'd2; hero_pos_vld = 1'b1; end  // CO
+            6'b000100: begin hero_pos = 3'd3; hero_pos_vld = 1'b1; end  // BTN
+            6'b000010: begin hero_pos = 3'd4; hero_pos_vld = 1'b1; end  // SB
+            6'b000001: begin hero_pos = 3'd5; hero_pos_vld = 1'b1; end  // BB
+            default:   begin hero_pos = 3'd0; hero_pos_vld = 1'b0; end
+        endcase
+    end
+
+    reg [2:0] villain_pos;
+    reg       villain_pos_vld;
+    always @(*) begin
+        case (villain_oh)
+            6'b100000: begin villain_pos = 3'd0; villain_pos_vld = 1'b1; end  // UTG
+            6'b010000: begin villain_pos = 3'd1; villain_pos_vld = 1'b1; end  // HJ
+            6'b001000: begin villain_pos = 3'd2; villain_pos_vld = 1'b1; end  // CO
+            6'b000100: begin villain_pos = 3'd3; villain_pos_vld = 1'b1; end  // BTN
+            6'b000010: begin villain_pos = 3'd4; villain_pos_vld = 1'b1; end  // SB
+            6'b000001: begin villain_pos = 3'd5; villain_pos_vld = 1'b1; end  // BB
+            default:   begin villain_pos = 3'd0; villain_pos_vld = 1'b0; end
+        endcase
+    end
+
+    reg [1:0] facing_action_sw;
+    reg       action_sw_vld;
+    always @(*) begin
+        case (action_oh)
+            3'b100: begin facing_action_sw = 2'd0; action_sw_vld = 1'b1; end  // RFI (UNOPENED)
+            3'b010: begin facing_action_sw = 2'd1; action_sw_vld = 1'b1; end  // OPEN (ONE_RAISE)
+            3'b001: begin facing_action_sw = 2'd2; action_sw_vld = 1'b1; end  // 3BET (THREE_BET)
+            default: begin facing_action_sw = 2'd0; action_sw_vld = 1'b0; end
+        endcase
+    end
+
+    wire switches_ok = hero_pos_vld && villain_pos_vld && action_sw_vld;
 
     wire [15:0] chart_addr = {hero_pos, villain_pos, facing_action_sw, hand_idx};
     wire [31:0] chart_word;
@@ -340,37 +379,25 @@ module Wrapper (
         end
     end
 
-    // DEBUG: mirror the last value latched into VGA slot 0 (addr 4411) onto
-    // the LEDs so you can verify what the hardware captured without depending
-    // on the VGA path.
-    // LED[14:0]: low 15 bits of the first VGA slot (high-card count) for
-    //            sanity-checking results.
-    // LED[15]:   live mirror of the synchronized BTNR input. If this LED does
-    //            not light when you hold BTNR, the pin is not wired up in the
-    //            Vivado .xdc constraints file (see the BTNR snippet below).
-    // LED diagnostics:
-    //   LED[15]   : BTNR (held-button indicator; from earlier work).
-    //   LED[14]   : chart_entry_valid   - ROM word's valid bit for the
-    //               currently addressed entry. Stays 0 until you both
-    //               (a) scanned 2 hole cards AND (b) set switches to a
-    //               chart-populated (pos, villain, action) combo.
-    //   LED[13]   : switches_ok         - hero_pos in 1..6, villain_pos
-    //               in 1..6, action in 0..2.
-    //   LED[12]   : both hole cards scanned (hole1_vld & hole2_vld).
-    //   LED[11:0] : low 12 bits of vga_display_value[0] (HIGH-CARD %).
+    // LED layout now mirrors the three one-hot switch fields so the LEDs
+    // over each field light in a dedicated color (wired up on the board,
+    // not in Verilog - Nexys A7 LD0..LD15 are single-color, so the color
+    // comes from whatever LED bank / filter is physically above each
+    // group of switches):
     //
-    // Debug flow: if you don't see the FOLD/CALL/RAISE rows, read the LEDs:
-    //   LED[12]=0 -> neither/only one hole card scanned yet.
-    //   LED[13]=0 -> switches are out of range (all zeros, all ones, or
-    //                action=11). Try SW[15:13]=001 (UTG) + SW[2:0]=110 (BB)
-    //                + SW[8:7]=00 as a simple known-valid pattern.
-    //   LED[14]=0 -> chart ROM says this (pos,villain,action,hand) has no
-    //                recommendation, or the ROM didn't load (path wrong?).
-    assign LED = {btnr_sync,
-                  chart_entry_valid,
-                  switches_ok,
-                  hole1_vld & hole2_vld,
-                  vga_display_value[0][11:0]};
+    //   LED[15:10] = SW[15:10]  (hero position   - green over the hero
+    //                            switch field)
+    //   LED[9]     = 0          (unused gap; SW[9] is not part of any
+    //                            field and has no chart meaning)
+    //   LED[8:6]   = SW[8:6]    (facing action   - blue over the action
+    //                            switch field)
+    //   LED[5:0]   = SW[5:0]    (villain position - red over the villain
+    //                            switch field)
+    //
+    // Each field is one-hot, so under normal use exactly one LED lights
+    // per field. Zero or multiple LEDs on in a field means switches_ok
+    // is false and the POS: row on the VGA will print "INVALID".
+    assign LED = {SW_Q[15:10], 1'b0, SW_Q[8:6], SW_Q[5:0]};
 
     uart_tx #(
         .CLK_HZ(25000000),
@@ -879,7 +906,7 @@ module vga_decimal_text_multi #(
     reg [7:0] action_tbl_c0 [0:2];
     reg [7:0] action_tbl_c1 [0:2];
     reg [7:0] action_tbl_c2 [0:2];
-    reg [7:0] action_tbl_c3 [0:2]; 
+    reg [7:0] action_tbl_c3 [0:2];
     reg [7:0] action_tbl_c4 [0:2];
     initial begin
         // 0=UTG, 1=HJ, 2=CO, 3=BTN, 4=SB, 5=BB  (pad 2-letter to 3 with space)
@@ -889,7 +916,8 @@ module vga_decimal_text_multi #(
         pos_name_tbl_c0[3]="B"; pos_name_tbl_c1[3]="T"; pos_name_tbl_c2[3]="N";
         pos_name_tbl_c0[4]="S"; pos_name_tbl_c1[4]="B"; pos_name_tbl_c2[4]=" ";
         pos_name_tbl_c0[5]="B"; pos_name_tbl_c1[5]="B"; pos_name_tbl_c2[5]=" ";
-        // 0=OPEN, 1=RAISE, 2=3BET (5 chars, space-padded)
+        // 0=UNOPENED (Raise-First-In), 1=ONE_RAISE (open to face),
+        // 2=THREE_BET. 5 chars, space-padded.
         action_tbl_c0[0]="R"; action_tbl_c1[0]="F"; action_tbl_c2[0]="I"; action_tbl_c3[0]=" "; action_tbl_c4[0]=" ";
         action_tbl_c0[1]="O"; action_tbl_c1[1]="P"; action_tbl_c2[1]="E"; action_tbl_c3[1]="N"; action_tbl_c4[1]=" ";
         action_tbl_c0[2]="3"; action_tbl_c1[2]="B"; action_tbl_c2[2]="E"; action_tbl_c3[2]="T"; action_tbl_c4[2]=" ";
