@@ -1,20 +1,4 @@
-/**
- * Integration wrapper for eval5 and eval7 poker-hand evaluators.
- *
- * Design:
- *   - While an eval5/eval7 instruction sits in the decode stage, this module
- *     takes over the two regfile read-address ports and asserts eval_stall to
- *     freeze the rest of the pipeline.
- *   - eval5 sweeps r1-r5, latching rank/suit counts and masks for the base
- *     five cards (held inside eval5_init_unit).
- *   - eval7 then reads r6 and r7 and finishes the bit masking to produce the
- *     final hand category.
- *   - When eval7 finishes, eval_wb_we pulses so the processor can write the
- *     result back into the destination register (FD_RD of the eval7 insn).
- *
- * Note: straight flush / royal flush are intentionally not detected; the
- * wheel straight (A-2-3-4-5) is handled by the eval7 unit.
- */
+//no straight flush
 module processor_eval_integration(
     input         clock,
     input         reset,
